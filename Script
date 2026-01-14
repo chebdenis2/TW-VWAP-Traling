@@ -155,8 +155,14 @@ inShort = strategy.position_size < 0
 //========================
 prev_range = math.max(syminfo.mintick, nz(high[1] - low[1], 0.0))
 
-var float trail_stop_long  = na
+var float trail_stop_long  = na   // фактический стоп, который будем передавать в strategy.exit
 var float trail_stop_short = na
+
+var float base_stop_long  = na    // "первоначальный стоп" как было задумано
+var float base_stop_short = na
+
+var int entry_bar_long  = na
+var int entry_bar_short = na
 
 new_long_pos  = (strategy.position_size > 0) and (strategy.position_size[1] <= 0)
 new_short_pos = (strategy.position_size < 0) and (strategy.position_size[1] >= 0)
@@ -164,22 +170,48 @@ new_short_pos = (strategy.position_size < 0) and (strategy.position_size[1] >= 0
 if not trail_stop_enabled
     trail_stop_long := na
     trail_stop_short := na
+    base_stop_long := na
+    base_stop_short := na
+    entry_bar_long := na
+    entry_bar_short := na
 else
-    // Long: стоп тянем только вверх
+    // На баре входа: фиксируем базовый стоп как раньше (для Levels сразу, для Anchor - позже, когда TP известен)
     if new_long_pos
-        trail_stop_long := close - prev_range
-    else if strategy.position_size > 0
-        trail_stop_long := math.max(nz(trail_stop_long, close - prev_range), close - prev_range)
-    else
-        trail_stop_long := na
-
-    // Short: стоп тянем только вниз
+        entry_bar_long := bar_index
+        base_stop_long := is_anchor_mode ? na : long_stop_loss
+        trail_stop_long := base_stop_long
     if new_short_pos
-        trail_stop_short := close + prev_range
-    else if strategy.position_size < 0
-        trail_stop_short := math.min(nz(trail_stop_short, close + prev_range), close + prev_range)
-    else
+        entry_bar_short := bar_index
+        base_stop_short := is_anchor_mode ? na : short_stop_loss
+        trail_stop_short := base_stop_short
+
+    // Сброс при выходе
+    if strategy.position_size == 0 and strategy.position_size[1] != 0
+        trail_stop_long := na
         trail_stop_short := na
+        base_stop_long := na
+        base_stop_short := na
+        entry_bar_long := na
+        entry_bar_short := na
+
+    // Long (Levels): на следующих барах тянем стоп (только вверх) на дистанции = диапазон предыдущей свечи
+    if strategy.position_size > 0 and not na(entry_bar_long) and not is_anchor_mode
+        // на баре входа — только базовый стоп
+        if bar_index == entry_bar_long
+            trail_stop_long := base_stop_long
+        else
+            candidate = close - prev_range
+            seed = nz(trail_stop_long, base_stop_long)
+            trail_stop_long := math.max(seed, candidate)
+
+    // Short (Levels): на следующих барах тянем стоп (только вниз)
+    if strategy.position_size < 0 and not na(entry_bar_short) and not is_anchor_mode
+        if bar_index == entry_bar_short
+            trail_stop_short := base_stop_short
+        else
+            candidate = close + prev_range
+            seed = nz(trail_stop_short, base_stop_short)
+            trail_stop_short := math.min(seed, candidate)
 
 // FIX: закрывать в конце анкора (на баре смены анкора)
 if force_close_end_period and isNewPeriod and (inLong or inShort)
@@ -260,7 +292,22 @@ if is_anchor_mode
         sl_dist  = tp_dist * (anchor_sl_pct_of_tp / 100)
         sl_price = strategy.position_avg_price - sl_dist
         if tp_dist > syminfo.mintick
-            sl_final = (trail_stop_enabled and not na(trail_stop_long)) ? math.max(sl_price, trail_stop_long) : sl_price
+            // Для Anchor: базовый стоп становится известен здесь, фиксируем один раз на баре входа
+            if trail_stop_enabled and strategy.position_size > 0 and na(base_stop_long)
+                base_stop_long := sl_price
+                trail_stop_long := sl_price
+                entry_bar_long := na(entry_bar_long) ? bar_index : entry_bar_long
+
+            // Трейлинг со следующей свечи после входа (оффсет = диапазон предыдущей свечи)
+            if trail_stop_enabled and not na(base_stop_long) and not na(entry_bar_long)
+                if bar_index == entry_bar_long
+                    trail_stop_long := base_stop_long
+                else
+                    candidate = close - prev_range
+                    seed = nz(trail_stop_long, base_stop_long)
+                    trail_stop_long := math.max(seed, candidate)
+
+            sl_final = trail_stop_enabled ? nz(trail_stop_long, sl_price) : sl_price
             strategy.exit("Anchor Exit L", from_entry="Anchor Long", limit=anchor_tp_price, stop=sl_final)
 
     if strategy.position_size < 0 and not na(anchor_tp_price)
@@ -268,7 +315,20 @@ if is_anchor_mode
         sl_dist  = tp_dist * (anchor_sl_pct_of_tp / 100)
         sl_price = strategy.position_avg_price + sl_dist
         if tp_dist > syminfo.mintick
-            sl_final = (trail_stop_enabled and not na(trail_stop_short)) ? math.min(sl_price, trail_stop_short) : sl_price
+            if trail_stop_enabled and strategy.position_size < 0 and na(base_stop_short)
+                base_stop_short := sl_price
+                trail_stop_short := sl_price
+                entry_bar_short := na(entry_bar_short) ? bar_index : entry_bar_short
+
+            if trail_stop_enabled and not na(base_stop_short) and not na(entry_bar_short)
+                if bar_index == entry_bar_short
+                    trail_stop_short := base_stop_short
+                else
+                    candidate = close + prev_range
+                    seed = nz(trail_stop_short, base_stop_short)
+                    trail_stop_short := math.min(seed, candidate)
+
+            sl_final = trail_stop_enabled ? nz(trail_stop_short, sl_price) : sl_price
             strategy.exit("Anchor Exit S", from_entry="Anchor Short", limit=anchor_tp_price, stop=sl_final)
 
 //========================
@@ -295,14 +355,25 @@ if not is_anchor_mode
     // Exits at levels (TP/SL)
     //========================
     if inLong and not na(short_level) and not na(long_stop_loss)
-        base_sl  = long_stop_loss
-        stop_sl  = (trail_stop_enabled and not na(trail_stop_long)) ? math.max(base_sl, trail_stop_long) : base_sl
+        // Стартовый SL: фиксируем как было задумано на момент входа
+        if trail_stop_enabled and na(base_stop_long)
+            base_stop_long := long_stop_loss
+            trail_stop_long := long_stop_loss
+            entry_bar_long := na(entry_bar_long) ? bar_index : entry_bar_long
+
+        base_sl  = nz(base_stop_long, long_stop_loss)
+        stop_sl  = trail_stop_enabled ? nz(trail_stop_long, base_sl) : base_sl
         strategy.exit("Long Exit", from_entry="Long", limit=short_level, stop=stop_sl)
         levels_long_stop_last := stop_sl
 
     if inShort and not na(long_level) and not na(short_stop_loss)
-        base_sl  = short_stop_loss
-        stop_sl  = (trail_stop_enabled and not na(trail_stop_short)) ? math.min(base_sl, trail_stop_short) : base_sl
+        if trail_stop_enabled and na(base_stop_short)
+            base_stop_short := short_stop_loss
+            trail_stop_short := short_stop_loss
+            entry_bar_short := na(entry_bar_short) ? bar_index : entry_bar_short
+
+        base_sl  = nz(base_stop_short, short_stop_loss)
+        stop_sl  = trail_stop_enabled ? nz(trail_stop_short, base_sl) : base_sl
         strategy.exit("Short Exit", from_entry="Short", limit=long_level, stop=stop_sl)
         levels_short_stop_last := stop_sl
 
