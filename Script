@@ -49,6 +49,9 @@ anchor_sl_pct_of_tp   = input.float(50.0, "SL (% от размера TP)", step=
 anchor_use_sessions   = input.bool(false, "Учитывать фильтр сессий для входа", group="Trading Mode")
 anchor_min_change_pct = input.float(0.5, "Мин. изменение VWAP между анкерами (%)", step=0.1, minval=0.0, group="Trading Mode")
 
+// Вычисляем сразу, т.к. используется ниже (например, в трейлинге)
+is_anchor_mode = trade_mode == "Anchor VWAP (Market)"
+
 //========================
 // Date range
 //========================
@@ -243,8 +246,6 @@ qty_calc() =>
 //========================
 // Новый режим: Anchor VWAP (Market)
 //========================
-is_anchor_mode = trade_mode == "Anchor VWAP (Market)"
-
 var float anchor_tp_price = na
 
 // Храним "закрывшийся VWAP" двух последних анкоров
