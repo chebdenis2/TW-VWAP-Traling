@@ -1,0 +1,307 @@
+//@version=6
+strategy("VCS 2 with VWAP Levels (1 Level)", overlay=true, calc_on_every_tick=true, process_orders_on_close=false)
+
+//========================
+// Inputs
+//========================
+hideonDWM = input.bool(false, "Hide VWAP on 1D or Above", group="VWAP Settings")
+
+anchor = input.string(
+     defval="Week",
+     title="Anchor Period",
+     options=[
+         "Session", "Hour", "2 Hours", "4 Hours", "8 Hours", "12 Hours",
+         "Week", "Month", "Quarter", "Year", "Decade", "Century",
+         "Earnings", "Dividends", "Splits"
+     ],
+     group="VWAP Settings"
+)
+
+src    = input.source(hlc3, "Source", group="VWAP Settings")
+offset = input.int(0, "Offset", group="VWAP Settings", minval=0)
+
+long_level_pct       = input.float(4.0, "Уровень Long (%)", step=0.1)
+short_level_pct      = input.float(4.0, "Уровень Short (%)", step=0.1)
+long_stop_loss_pct   = input.float(12.0, "Стоп-лосс Long (%)", step=0.1)
+short_stop_loss_pct  = input.float(12.0, "Стоп-лосс Short (%)", step=0.1)
+
+trade_direction = input.string("Long", "Направление сделки", options=["Long", "Short", "Both"])
+
+start_year  = input.int(2025, "Год начала")
+start_month = input.int(1, "Месяц начала", minval=1, maxval=12)
+end_year    = input.int(2025, "Год окончания")
+end_month   = input.int(12, "Месяц окончания", minval=1, maxval=12)
+
+// Сессии (время биржи инструмента). Ограничивают ТОЛЬКО открытия сделок.
+session_asia_enabled    = input.bool(true, "Азия", group="Sessions")
+session_europe_enabled  = input.bool(true, "Европа", group="Sessions")
+session_america_enabled = input.bool(true, "Америка", group="Sessions")
+
+// Принудительные закрытия
+force_close_end_period  = input.bool(false, "Принудительно закрыть все позиции по окончанию периода (анкора)", group="Force Close")
+force_close_end_session = input.bool(false, "Принудительно закрыть все позиции в конце выбранной сессии", group="Force Close")
+
+// Новый режим торговли
+trade_mode            = input.string("Levels", "Режим торговли", options=["Levels", "Anchor VWAP (Market)"], group="Trading Mode")
+anchor_sl_pct_of_tp   = input.float(50.0, "SL (% от размера TP)", step=1.0, minval=0.0, group="Trading Mode")
+anchor_use_sessions   = input.bool(false, "Учитывать фильтр сессий для входа", group="Trading Mode")
+anchor_min_change_pct = input.float(0.5, "Мин. изменение VWAP между анкерами (%)", step=0.1, minval=0.0, group="Trading Mode")
+
+//========================
+// Date range
+//========================
+start_date = timestamp(start_year, start_month, 1, 0, 0)
+
+end_month_next = end_month == 12 ? 1 : (end_month + 1)
+end_year_next  = end_month == 12 ? (end_year + 1) : end_year
+end_date       = timestamp(end_year_next, end_month_next, 1, 0, 0) - 1
+
+in_date_range = (time >= start_date) and (time <= end_date)
+
+//========================
+// Sessions filter (for entries only)
+//========================
+inSession(sess) => not na(time(timeframe.period, sess))
+
+in_asia    = inSession("0000-0800")
+in_europe  = inSession("0800-1600")
+in_america = inSession("1600-2359")
+
+can_open_by_session =
+     (session_asia_enabled and in_asia) or
+     (session_europe_enabled and in_europe) or
+     (session_america_enabled and in_america)
+
+//========================
+// VWAP (anchored)
+//========================
+cumVolume = ta.cum(volume)
+if barstate.islast and cumVolume == 0
+    runtime.error("No volume is provided by the data vendor.")
+
+new_earnings  = request.earnings(syminfo.tickerid, earnings.actual, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_dividends = request.dividends(syminfo.tickerid, dividends.gross, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+new_split     = request.splits(syminfo.tickerid, splits.denominator, barmerge.gaps_on, barmerge.lookahead_on, ignore_invalid_symbol=true)
+
+isNewPeriod = switch anchor
+    "Earnings"  => not na(new_earnings)
+    "Dividends" => not na(new_dividends)
+    "Splits"    => not na(new_split)
+    "Session"   => timeframe.change("D")
+    "Hour"      => timeframe.change("60")
+    "2 Hours"   => timeframe.change("120")
+    "4 Hours"   => timeframe.change("240")
+    "8 Hours"   => timeframe.change("480")
+    "12 Hours"  => timeframe.change("720")
+    "Week"      => timeframe.change("W")
+    "Month"     => timeframe.change("M")
+    "Quarter"   => timeframe.change("3M")
+    "Year"      => timeframe.change("12M")
+    "Decade"    => timeframe.change("12M") and year % 10 == 0
+    "Century"   => timeframe.change("12M") and year % 100 == 0
+    => false
+
+isEsdAnchor = anchor == "Earnings" or anchor == "Dividends" or anchor == "Splits"
+if na(src[1]) and not isEsdAnchor
+    isNewPeriod := true
+
+float vwap_value = na
+if not (hideonDWM and timeframe.isdwm)
+    [_vwap, _, _] = ta.vwap(src, isNewPeriod, 1)
+    vwap_value := _vwap
+
+//========================
+// Levels
+//========================
+long_level      = vwap_value * (1 - long_level_pct / 100)
+short_level     = vwap_value * (1 + short_level_pct / 100)
+long_stop_loss  = vwap_value * (1 - long_stop_loss_pct / 100)
+short_stop_loss = vwap_value * (1 + short_stop_loss_pct / 100)
+
+//========================
+// State
+//========================
+var bool long_trading_paused  = false
+var bool short_trading_paused = false
+
+// Both: после стопа чередуем направления (начинаем с Short при входе в период)
+var string both_active_side = "Short"
+
+entered_date_range = in_date_range and not in_date_range[1]
+exited_date_range  = not in_date_range and in_date_range[1]
+
+if entered_date_range
+    both_active_side := "Short"
+    long_trading_paused := false
+    short_trading_paused := false
+
+allow_long  = trade_direction == "Long"  or (trade_direction == "Both" and both_active_side == "Long")
+allow_short = trade_direction == "Short" or (trade_direction == "Both" and both_active_side == "Short")
+
+//========================
+// Force close
+//========================
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// FIX: закрывать в конце анкора (на баре смены анкора)
+if force_close_end_period and isNewPeriod and (inLong or inShort)
+    strategy.close_all(comment="End of anchor")
+    long_trading_paused := false
+    short_trading_paused := false
+
+// Старое закрытие по окончанию дата-периода (оставлено)
+if force_close_end_period and exited_date_range
+    strategy.close_all(comment="End of date range")
+    long_trading_paused := false
+    short_trading_paused := false
+
+end_asia    = session_asia_enabled and in_asia[1] and not in_asia
+end_europe  = session_europe_enabled and in_europe[1] and not in_europe
+end_america = session_america_enabled and in_america[1] and not in_america
+
+if force_close_end_session and (end_asia or end_europe or end_america)
+    strategy.close_all(comment="End of session")
+    long_trading_paused := false
+    short_trading_paused := false
+
+//========================
+// Qty
+//========================
+qty_calc() =>
+    math.max(1, math.min(1000000, math.floor(strategy.equity * 0.25 / close)))
+
+//========================
+// Новый режим: Anchor VWAP (Market)
+//========================
+is_anchor_mode = trade_mode == "Anchor VWAP (Market)"
+
+var float anchor_tp_price = na
+
+// Храним "закрывшийся VWAP" двух последних анкоров
+var float anchor_vwap_last = na   // VWAP только что закрытого анкора
+var float anchor_vwap_prev = na   // VWAP анкора ДО него
+
+if isNewPeriod
+    anchor_vwap_prev := anchor_vwap_last
+    anchor_vwap_last := vwap_value[1] // последняя цена VWAP в предыдущем анкоре
+
+anchor_tp_base = anchor_vwap_last
+
+anchor_change_pct = (not na(anchor_vwap_prev) and anchor_vwap_prev != 0) ? (math.abs(anchor_vwap_last - anchor_vwap_prev) / anchor_vwap_prev * 100) : na
+anchor_pass_filter = not na(anchor_change_pct) and (anchor_change_pct >= anchor_min_change_pct)
+
+anchor_allow_long  = trade_direction == "Long" or trade_direction == "Both"
+anchor_allow_short = trade_direction == "Short" or trade_direction == "Both"
+
+anchor_can_open = in_date_range and (not anchor_use_sessions or can_open_by_session) and not na(anchor_tp_base) and anchor_pass_filter
+
+// сбрасываем TP только когда позиция реально закрылась
+just_closed = (strategy.position_size == 0) and (strategy.position_size[1] != 0)
+if just_closed
+    anchor_tp_price := na
+
+if is_anchor_mode
+    // чтобы лимитки уровней не срабатывали параллельно
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+
+    // на смене анкора: закрыть и открыть по рынку к VWAP предыдущего анкора
+    if isNewPeriod and anchor_can_open
+        strategy.close_all(comment="Anchor change")
+
+        if close < anchor_tp_base and anchor_allow_long
+            strategy.entry("Anchor Long", strategy.long, qty=qty_calc())
+            anchor_tp_price := anchor_tp_base
+        else if close > anchor_tp_base and anchor_allow_short
+            strategy.entry("Anchor Short", strategy.short, qty=qty_calc())
+            anchor_tp_price := anchor_tp_base
+
+    // выходы: TP = anchor_tp_price, SL = % от размера TP-движения
+    if strategy.position_size > 0 and not na(anchor_tp_price)
+        tp_dist  = math.abs(anchor_tp_price - strategy.position_avg_price)
+        sl_dist  = tp_dist * (anchor_sl_pct_of_tp / 100)
+        sl_price = strategy.position_avg_price - sl_dist
+        if tp_dist > syminfo.mintick
+            strategy.exit("Anchor Exit L", from_entry="Anchor Long", limit=anchor_tp_price, stop=sl_price)
+
+    if strategy.position_size < 0 and not na(anchor_tp_price)
+        tp_dist  = math.abs(anchor_tp_price - strategy.position_avg_price)
+        sl_dist  = tp_dist * (anchor_sl_pct_of_tp / 100)
+        sl_price = strategy.position_avg_price + sl_dist
+        if tp_dist > syminfo.mintick
+            strategy.exit("Anchor Exit S", from_entry="Anchor Short", limit=anchor_tp_price, stop=sl_price)
+
+//========================
+// Старый режим: “Touch entry” via LIMIT orders (Levels)
+//========================
+if not is_anchor_mode
+    can_place_long  = in_date_range and allow_long and (trade_direction == "Both" or not long_trading_paused) and can_open_by_session and strategy.position_size == 0 and not na(long_level)
+    can_place_short = in_date_range and allow_short and (trade_direction == "Both" or not short_trading_paused) and can_open_by_session and strategy.position_size == 0 and not na(short_level)
+
+    // Если нельзя открывать — отменяем лимитки, чтобы не сработали “позже”
+    if not can_place_long
+        strategy.cancel("Long")
+    if not can_place_short
+        strategy.cancel("Short")
+
+    // Лимитка стоит на уровне и заполняется при касании
+    if can_place_long
+        strategy.entry("Long", strategy.long, qty=qty_calc(), limit=long_level)
+
+    if can_place_short
+        strategy.entry("Short", strategy.short, qty=qty_calc(), limit=short_level)
+
+    //========================
+    // Exits at levels (TP/SL)
+    //========================
+    if inLong and not na(short_level) and not na(long_stop_loss)
+        strategy.exit("Long Exit", from_entry="Long", limit=short_level, stop=long_stop_loss)
+
+    if inShort and not na(long_level) and not na(short_stop_loss)
+        strategy.exit("Short Exit", from_entry="Short", limit=long_level, stop=short_stop_loss)
+
+    //========================
+    // Pause / Both переключение после STOP (по цене выхода)
+    //========================
+    new_closed = strategy.closedtrades > strategy.closedtrades[1]
+    if new_closed
+        last = strategy.closedtrades - 1
+        eid  = strategy.closedtrades.entry_id(last)
+        xpr  = strategy.closedtrades.exit_price(last)
+
+        is_long_stop  = (eid == "Long")  and not na(long_stop_loss)  and math.abs(xpr - long_stop_loss)  <= syminfo.mintick * 2
+        is_short_stop = (eid == "Short") and not na(short_stop_loss) and math.abs(xpr - short_stop_loss) <= syminfo.mintick * 2
+
+        if is_long_stop
+            if trade_direction == "Both"
+                both_active_side := "Short"
+                long_trading_paused := false
+                short_trading_paused := false
+            else
+                long_trading_paused := true
+
+        if is_short_stop
+            if trade_direction == "Both"
+                both_active_side := "Long"
+                long_trading_paused := false
+                short_trading_paused := false
+            else
+                short_trading_paused := true
+
+    // Разморозка после “отката”
+    if trade_direction != "Both" and long_trading_paused and not na(short_level) and high >= short_level
+        long_trading_paused := false
+    if trade_direction != "Both" and short_trading_paused and not na(long_level) and low <= long_level
+        short_trading_paused := false
+
+//========================
+// Plots
+//========================
+plot(vwap_value, title="VWAP", color=color.blue, linewidth=2, offset=offset)
+plot(long_level, title="Long Level", color=color.green, linewidth=1, style=plot.style_circles, offset=offset)
+plot(short_level, title="Short Level", color=color.red, linewidth=1, style=plot.style_circles, offset=offset)
+plot(long_stop_loss, title="SL Long", color=color.orange, linewidth=1, style=plot.style_circles, offset=offset)
+plot(short_stop_loss, title="SL Short", color=color.orange, linewidth=1, style=plot.style_circles, offset=offset)
+
+plot(is_anchor_mode ? anchor_tp_base : na, title="Anchor TP (prev anchor VWAP)", color=color.purple, linewidth=2, style=plot.style_linebr, offset=offset)
