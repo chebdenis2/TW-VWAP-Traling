@@ -25,6 +25,9 @@ short_level_pct      = input.float(4.0, "Уровень Short (%)", step=0.1)
 long_stop_loss_pct   = input.float(12.0, "Стоп-лосс Long (%)", step=0.1)
 short_stop_loss_pct  = input.float(12.0, "Стоп-лосс Short (%)", step=0.1)
 
+trailing_stop_enabled = input.bool(false, "Трейлинг-стоп", group="Trailing Stop")
+trailing_candle_filter = input.string("All", "Свечи для трейлинга", options=["All", "Opposite"], group="Trailing Stop")
+
 trade_direction = input.string("Long", "Направление сделки", options=["Long", "Short", "Both"])
 
 start_year  = input.int(2025, "Год начала")
@@ -123,6 +126,10 @@ short_stop_loss = vwap_value * (1 + short_stop_loss_pct / 100)
 //========================
 var bool long_trading_paused  = false
 var bool short_trading_paused = false
+var float long_trailing_sl = na
+var float short_trailing_sl = na
+var float last_long_stop = na
+var float last_short_stop = na
 
 // Both: после стопа чередуем направления (начинаем с Short при входе в период)
 var string both_active_side = "Short"
@@ -217,21 +224,6 @@ if is_anchor_mode
             strategy.entry("Anchor Short", strategy.short, qty=qty_calc())
             anchor_tp_price := anchor_tp_base
 
-    // выходы: TP = anchor_tp_price, SL = % от размера TP-движения
-    if strategy.position_size > 0 and not na(anchor_tp_price)
-        tp_dist  = math.abs(anchor_tp_price - strategy.position_avg_price)
-        sl_dist  = tp_dist * (anchor_sl_pct_of_tp / 100)
-        sl_price = strategy.position_avg_price - sl_dist
-        if tp_dist > syminfo.mintick
-            strategy.exit("Anchor Exit L", from_entry="Anchor Long", limit=anchor_tp_price, stop=sl_price)
-
-    if strategy.position_size < 0 and not na(anchor_tp_price)
-        tp_dist  = math.abs(anchor_tp_price - strategy.position_avg_price)
-        sl_dist  = tp_dist * (anchor_sl_pct_of_tp / 100)
-        sl_price = strategy.position_avg_price + sl_dist
-        if tp_dist > syminfo.mintick
-            strategy.exit("Anchor Exit S", from_entry="Anchor Short", limit=anchor_tp_price, stop=sl_price)
-
 //========================
 // Старый режим: “Touch entry” via LIMIT orders (Levels)
 //========================
@@ -252,14 +244,90 @@ if not is_anchor_mode
     if can_place_short
         strategy.entry("Short", strategy.short, qty=qty_calc(), limit=short_level)
 
-    //========================
-    // Exits at levels (TP/SL)
-    //========================
-    if inLong and not na(short_level) and not na(long_stop_loss)
-        strategy.exit("Long Exit", from_entry="Long", limit=short_level, stop=long_stop_loss)
+//========================
+// Trailing stop (общий)
+//========================
+just_entered_long = inLong and not inLong[1]
+just_entered_short = inShort and not inShort[1]
 
-    if inShort and not na(long_level) and not na(short_stop_loss)
-        strategy.exit("Short Exit", from_entry="Short", limit=long_level, stop=short_stop_loss)
+float anchor_tp_dist = na
+float anchor_sl_long = na
+float anchor_sl_short = na
+if is_anchor_mode and not na(anchor_tp_price)
+    anchor_tp_dist := math.abs(anchor_tp_price - strategy.position_avg_price)
+    if anchor_tp_dist > syminfo.mintick
+        anchor_sl_long := inLong ? (strategy.position_avg_price - anchor_tp_dist * (anchor_sl_pct_of_tp / 100)) : na
+        anchor_sl_short := inShort ? (strategy.position_avg_price + anchor_tp_dist * (anchor_sl_pct_of_tp / 100)) : na
+
+float base_sl_long = na
+float base_sl_short = na
+base_sl_long := is_anchor_mode ? anchor_sl_long : long_stop_loss
+base_sl_short := is_anchor_mode ? anchor_sl_short : short_stop_loss
+
+if inLong
+    if just_entered_long and not na(base_sl_long)
+        long_trailing_sl := base_sl_long
+    else if barstate.isnew and not na(base_sl_long)
+        float cur = na(long_trailing_sl) ? base_sl_long : long_trailing_sl
+        float new_sl = math.max(cur, base_sl_long)
+        if trailing_stop_enabled
+            float body = math.abs(close[1] - open[1])
+            if body > 0
+                float cand = na
+                if trailing_candle_filter == "All"
+                    cand := cur + body
+                else
+                    if close[1] < open[1]
+                        cand := cur + (open[1] - close[1])
+                if not na(cand)
+                    new_sl := math.max(new_sl, cand)
+        long_trailing_sl := new_sl
+else
+    long_trailing_sl := na
+
+if inShort
+    if just_entered_short and not na(base_sl_short)
+        short_trailing_sl := base_sl_short
+    else if barstate.isnew and not na(base_sl_short)
+        float cur = na(short_trailing_sl) ? base_sl_short : short_trailing_sl
+        float new_sl = math.min(cur, base_sl_short)
+        if trailing_stop_enabled
+            float body = math.abs(close[1] - open[1])
+            if body > 0
+                float cand = na
+                if trailing_candle_filter == "All"
+                    cand := cur - body
+                else
+                    if close[1] > open[1]
+                        cand := cur - (close[1] - open[1])
+                if not na(cand)
+                    new_sl := math.min(new_sl, cand)
+        short_trailing_sl := new_sl
+else
+    short_trailing_sl := na
+
+active_sl_long = inLong ? (na(long_trailing_sl) ? base_sl_long : long_trailing_sl) : na
+active_sl_short = inShort ? (na(short_trailing_sl) ? base_sl_short : short_trailing_sl) : na
+
+if inLong and not na(active_sl_long)
+    last_long_stop := active_sl_long
+if inShort and not na(active_sl_short)
+    last_short_stop := active_sl_short
+
+//========================
+// Exits (TP/SL)
+//========================
+if is_anchor_mode
+    if inLong and not na(anchor_tp_price) and not na(active_sl_long) and not na(anchor_tp_dist) and anchor_tp_dist > syminfo.mintick
+        strategy.exit("Anchor Exit L", from_entry="Anchor Long", limit=anchor_tp_price, stop=active_sl_long)
+    if inShort and not na(anchor_tp_price) and not na(active_sl_short) and not na(anchor_tp_dist) and anchor_tp_dist > syminfo.mintick
+        strategy.exit("Anchor Exit S", from_entry="Anchor Short", limit=anchor_tp_price, stop=active_sl_short)
+else
+    if inLong and not na(short_level) and not na(active_sl_long)
+        strategy.exit("Long Exit", from_entry="Long", limit=short_level, stop=active_sl_long)
+
+    if inShort and not na(long_level) and not na(active_sl_short)
+        strategy.exit("Short Exit", from_entry="Short", limit=long_level, stop=active_sl_short)
 
     //========================
     // Pause / Both переключение после STOP (по цене выхода)
@@ -270,8 +338,8 @@ if not is_anchor_mode
         eid  = strategy.closedtrades.entry_id(last)
         xpr  = strategy.closedtrades.exit_price(last)
 
-        is_long_stop  = (eid == "Long")  and not na(long_stop_loss)  and math.abs(xpr - long_stop_loss)  <= syminfo.mintick * 2
-        is_short_stop = (eid == "Short") and not na(short_stop_loss) and math.abs(xpr - short_stop_loss) <= syminfo.mintick * 2
+        is_long_stop  = (eid == "Long")  and not na(last_long_stop)  and math.abs(xpr - last_long_stop)  <= syminfo.mintick * 2
+        is_short_stop = (eid == "Short") and not na(last_short_stop) and math.abs(xpr - last_short_stop) <= syminfo.mintick * 2
 
         if is_long_stop
             if trade_direction == "Both"
