@@ -123,7 +123,7 @@ if not (hideonDWM and timeframe.isdwm)
 //========================
 // Time helpers
 //========================
-is_new_candle = ta.change(time(refresh_tf))
+is_new_candle = ta.change(time(refresh_tf)) != 0
 prev_o = request.security(syminfo.tickerid, refresh_tf, open[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
 prev_c = request.security(syminfo.tickerid, refresh_tf, close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
 
