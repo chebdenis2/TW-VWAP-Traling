@@ -124,8 +124,10 @@ if not (hideonDWM and timeframe.isdwm)
 // Time helpers
 //========================
 is_new_candle = ta.change(time(refresh_tf)) != 0
-prev_o = request.security(syminfo.tickerid, refresh_tf, open[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
-prev_c = request.security(syminfo.tickerid, refresh_tf, close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+htf_open = request.security(syminfo.tickerid, refresh_tf, open, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+htf_close = request.security(syminfo.tickerid, refresh_tf, close, gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+prev_o = htf_open[1]
+prev_c = htf_close[1]
 
 //========================
 // Helpers
