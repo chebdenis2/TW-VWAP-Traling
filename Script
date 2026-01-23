@@ -269,7 +269,7 @@ if is_vwap_mode and dir_input == "BOTH"
             if not na(prev_anchor_vwap) and prev_anchor_vwap != 0 and not na(vwap_anchor_open_price)
                 delta_pct = math.abs(vwap_anchor_open_price - prev_anchor_vwap) / prev_anchor_vwap * 100
                 if delta_pct >= vwap_both_min_delta_pct
-                    vwap_anchor_direction := vwap_anchor_open_price > prev_anchor_vwap ? "SHORT" : "LONG"
+                    vwap_anchor_direction := vwap_anchor_open_price > prev_anchor_vwap ? "LONG" : "SHORT"
                 else
                     vwap_anchor_direction := ""
                 vwap_anchor_decided := true
