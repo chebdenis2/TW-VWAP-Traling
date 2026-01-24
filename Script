@@ -23,6 +23,7 @@ offset = input.int(0, "Offset", group="VWAP Settings", minval=0)
 trade_mode = input.string("VWAP (Limit)", "Strategy", options=["VWAP (Limit)", "Anchor Open (Market)"], group="Strategy")
 direction = input.string("LONG", "Direction", options=["LONG", "SHORT", "BOTH"], group="Strategy")
 vwap_both_min_delta_pct = input.float(0.1, "BOTH min delta (%)", step=0.1, group="Strategy")
+vwap_both_max_delta_pct = input.float(0.0, "BOTH max delta (%)", step=0.1, group="Strategy")
 vwap_both_start_direction = input.string("NONE", "BOTH start direction", options=["NONE", "LONG", "SHORT"], group="Strategy")
 
 entry_distance_long_pct  = input.float(1.0, "Entry Long (%)", step=0.1, group="VWAP Levels")
@@ -268,7 +269,11 @@ if is_vwap_mode and dir_input == "BOTH"
         if not vwap_anchor_decided
             if not na(prev_anchor_vwap) and prev_anchor_vwap != 0 and not na(vwap_anchor_open_price)
                 delta_pct = math.abs(vwap_anchor_open_price - prev_anchor_vwap) / prev_anchor_vwap * 100
-                if delta_pct >= vwap_both_min_delta_pct
+                min_thr = vwap_both_min_delta_pct
+                max_thr = vwap_both_max_delta_pct
+                use_max = max_thr > 0
+                max_thr_adj = use_max and max_thr < min_thr ? min_thr : max_thr
+                if delta_pct >= min_thr and (not use_max or delta_pct <= max_thr_adj)
                     vwap_anchor_direction := vwap_anchor_open_price > prev_anchor_vwap ? "LONG" : "SHORT"
                 else
                     vwap_anchor_direction := ""
